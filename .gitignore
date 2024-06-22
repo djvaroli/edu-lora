@@ -1,0 +1,11 @@
+# datasets
+MNIST/*
+imagenette2-160/*
+
+
+# python files
+*.pyc
+__pycache__/
+
+# generated CSV files
+*.csv
