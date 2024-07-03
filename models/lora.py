@@ -2,6 +2,7 @@ from typing import Callable, Literal
 
 import torch
 from torch import nn
+from torch import functional as F
 
 
 class LowRankAdapter(nn.Module):
@@ -11,6 +12,7 @@ class LowRankAdapter(nn.Module):
         out_features: int,
         rank: int,
         b_init: Callable[[int, int], torch.Tensor] = torch.zeros,
+        device: torch.device | str | None = None,
     ):
         super().__init__()
 
@@ -23,6 +25,9 @@ class LowRankAdapter(nn.Module):
         # init B to zeros s.t. initially outputs of LoRA module match of original module
         self.B = nn.Parameter(b_init(rank, out_features))
 
+        if device is not None:
+            self.to(device)
+        
     def _reinit_B(
         self, b_init: Callable[[int, int], torch.Tensor] = torch.zeros
     ) -> None:
@@ -71,7 +76,7 @@ class LowRankLinearAdapter(LowRankLinearAdapterBase):
 
             # create a low-rank adapter
             out_dim, in_dim = self._linear.weight.shape
-            self._lora = LowRankAdapter(in_dim, out_dim, rank)
+            self._lora = LowRankAdapter(in_dim, out_dim, rank, device=self._linear.weight.device)
 
     def merge_weights(self) -> None:
         if self._rank > 0:
@@ -93,10 +98,11 @@ class LowRankLinearAdapter(LowRankLinearAdapterBase):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # forward pass through original weights
-        linear_out = inputs @ self._linear.weight.T
-
+        
         if self._linear.bias is not None:
-            linear_out += self._linear.bias
+            linear_out = nn.functional.linear(inputs, self._linear.weight, self._linear.bias)
+        else:
+            linear_out = nn.functional.linear(inputs, self._linear.weight)
 
         if self._merged or self._lora is None:
             # if the weights have been merged, LoRA updates included in self._linear.weight
@@ -105,6 +111,8 @@ class LowRankLinearAdapter(LowRankLinearAdapterBase):
 
         return linear_out + self._alpha * self._lora(inputs)
 
+    def extra_repr(self) -> str:
+        return f'r={self._rank}, alpha={self._alpha}, merged={self._merged}'
 
 class WeightDecomposedLinearAdapater(LowRankLinearAdapterBase):
     def __init__(self, linear: nn.Linear, rank: int, alpha: float = 1.0):
@@ -165,6 +173,33 @@ _type_to_adapter_map: dict[str, LowRankLinearAdapterBase] = {
 }
 
 
+# find the parent of a nested attribute path
+def _find_parent_of_nested_attr(obj, attribute_path: str):
+    path = attribute_path.split(".")
+    parent = obj
+    for attr in path[:-1]:
+        parent = getattr(parent, attr)
+    
+    if not hasattr(parent, path[-1]):
+        raise AttributeError(f"Object {parent} does not have attribute {path[-1]}")
+    
+    return parent, path[-1]
+
+
+def _set_module_attr(module: nn.Module, name: str, value: nn.Module) -> None:
+    """Sets the attribute of a module with the specified name to the specified value.
+
+    Args:
+        module (nn.Module): module to set the attribute on.
+        name (str): name of the attribute to set.
+            Can be a "." separated nested attribute name, e.g. "adapter.lora.linear".
+        value (nn.Module): value to set the attribute to.
+
+    """
+    parent, child_name = _find_parent_of_nested_attr(module, name)
+    setattr(parent, child_name, value)
+    
+
 def adapt_model(
     model: nn.Module,
     low_rank_adapter_type: Literal["lora", "dora"],
@@ -185,16 +220,23 @@ def adapt_model(
 
     adapter_class = _type_to_adapter_map[low_rank_adapter_type]
 
-    for child_name, child in model.named_children():
-        if isinstance(child, nn.Linear):
-            setattr(model, child_name, adapter_class.from_linear(child, rank, alpha))
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            _set_module_attr(model, name, adapter_class.from_linear(module, rank, alpha))
 
     return model
 
 
-# want to get two separate outpus: a) through the original weights, b) through the low-rank adapters
-# not all layers may have been adapted
-# expect to have activation layers
+def merge_adapters(model: nn.Module) -> None:
+    """Merges the weights of all low-rank adapters in the model with the original weights.
+
+    Args:
+        model (nn.Module): model with low-rank adapters to merge.
+
+    """
+    for module in model.modules():
+        if isinstance(module, LowRankLinearAdapterBase):
+            module.merge_weights()
 
 
 class LowRankSequential(nn.Sequential):

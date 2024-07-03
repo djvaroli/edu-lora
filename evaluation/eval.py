@@ -7,12 +7,15 @@ from .metrics.accuracy import compute_accuracy
 
 @torch.no_grad()
 def evaluate_classifier(
-    model: nn.Module, eval_loader: DataLoader, loss_fn: nn.Module, device: torch.device
+    model: nn.Module, 
+    eval_loader: DataLoader, 
+    loss_fn: nn.Module, 
+    device: torch.device
 ) -> dict[str, float]:
     model.eval()
 
-    eval_loss = 0
-    eval_accuracy = 0
+    eval_loss = torch.tensor(0.0, device=device)
+    eval_accuracy = torch.tensor(0.0, device=device)
     eval_steps = 0
 
     for inputs, targets in eval_loader:
@@ -22,8 +25,8 @@ def evaluate_classifier(
         predictions = model(inputs)
         loss = loss_fn(predictions, targets)
 
-        eval_loss += loss.item()
-        eval_accuracy += compute_accuracy(predictions, targets).item()
+        eval_loss += loss
+        eval_accuracy += compute_accuracy(predictions, targets)
         eval_steps += 1
 
     eval_loss /= eval_steps
@@ -31,4 +34,4 @@ def evaluate_classifier(
 
     model.train()
 
-    return {"eval_loss": eval_loss, "eval_accuracy": eval_accuracy}
+    return {"eval_loss": eval_loss.item(), "eval_accuracy": eval_accuracy.item()}

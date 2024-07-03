@@ -9,3 +9,6 @@ __pycache__/
 
 # generated CSV files
 *.csv
+
+# wandb files
+wandb/
